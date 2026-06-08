@@ -10,6 +10,7 @@ from app.models import (
     Drug,
     User,
     AuditLog,
+    SupplementRecord,
     PrescriptionStatus,
     AuditOpinion,
     DrugCategory,
@@ -18,7 +19,8 @@ from app.models import (
 from app.schemas import (
     PrescriptionCreate,
     PharmacistReview,
-    RemoteAudit
+    RemoteAudit,
+    SupplementNoteCreate
 )
 
 
@@ -426,6 +428,7 @@ def get_audit_opinion_history(db: Session, prescription_id: int) -> dict:
         raise ValueError("处方不存在")
 
     logs = get_audit_logs(db, prescription_id)
+    supplement_records = get_supplement_records(db, prescription_id)
 
     pharmacist_logs = [
         log for log in logs
@@ -449,7 +452,8 @@ def get_audit_opinion_history(db: Session, prescription_id: int) -> dict:
         "remote_auditor_remark": prescription.remote_auditor_remark,
         "remote_audit_time": prescription.remote_audit_time.isoformat() if prescription.remote_audit_time else None,
         "pharmacist_history": [_serialize_audit_log(log) for log in pharmacist_logs],
-        "remote_auditor_history": [_serialize_audit_log(log) for log in remote_auditor_logs]
+        "remote_auditor_history": [_serialize_audit_log(log) for log in remote_auditor_logs],
+        "supplement_records": [_serialize_supplement_record(r) for r in supplement_records]
     }
 
 
@@ -488,3 +492,85 @@ def get_user(db: Session, user_id: int) -> Optional[User]:
 
 def get_drug(db: Session, drug_code: str) -> Optional[Drug]:
     return db.query(Drug).filter(Drug.code == drug_code).first()
+
+
+def add_supplement_note(
+    db: Session,
+    prescription_id: int,
+    note_in: SupplementNoteCreate
+) -> SupplementRecord:
+    prescription = get_prescription(db, prescription_id)
+    if not prescription:
+        raise ValueError("处方不存在")
+
+    if prescription.status == PrescriptionStatus.PICKED_UP:
+        raise ValueError("处方已核销，无法补录说明")
+
+    if prescription.status == PrescriptionStatus.EXPIRED or prescription.is_expired():
+        if prescription.status != PrescriptionStatus.EXPIRED:
+            prescription.status = PrescriptionStatus.EXPIRED
+            db.commit()
+            log_audit(
+                db=db,
+                prescription_id=prescription_id,
+                operator_id=None,
+                action="处方过期",
+                old_status=prescription.status,
+                new_status=PrescriptionStatus.EXPIRED,
+                remark="处方已过期，无法补录说明"
+            )
+        raise ValueError("处方已过期，无法补录说明")
+
+    if prescription.status != PrescriptionStatus.UPLOADED:
+        raise ValueError(f"处方状态为{prescription.status.value}，仅待审方（UPLOADED）状态的处方可补录说明")
+
+    handler = get_user(db, note_in.handler_id)
+    if not handler:
+        raise ValueError("处理人不存在")
+
+    if handler.role not in [UserRole.PHARMACIST, UserRole.REMOTE_AUDITOR]:
+        raise ValueError("处理人必须是药师或远程审方人员")
+
+    record = SupplementRecord(
+        prescription_id=prescription_id,
+        missing_reason=note_in.missing_reason,
+        supplement_deadline=note_in.supplement_deadline,
+        handler_id=note_in.handler_id,
+        handler_name=handler.name,
+        remark=note_in.remark
+    )
+
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+
+    log_audit(
+        db=db,
+        prescription_id=prescription_id,
+        operator_id=note_in.handler_id,
+        action="临时补录说明",
+        old_status=prescription.status,
+        new_status=prescription.status,
+        remark=f"缺失原因：{note_in.missing_reason}，补交时间：{note_in.supplement_deadline.strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+
+    return record
+
+
+def get_supplement_records(db: Session, prescription_id: int) -> List[SupplementRecord]:
+    return db.query(SupplementRecord).filter(
+        SupplementRecord.prescription_id == prescription_id
+    ).order_by(SupplementRecord.created_at.desc()).all()
+
+
+def _serialize_supplement_record(record: SupplementRecord) -> dict:
+    return {
+        "id": record.id,
+        "prescription_id": record.prescription_id,
+        "missing_reason": record.missing_reason,
+        "supplement_deadline": record.supplement_deadline.isoformat() if record.supplement_deadline else None,
+        "handler_id": record.handler_id,
+        "handler_name": record.handler_name,
+        "remark": record.remark,
+        "created_at": record.created_at.isoformat() if record.created_at else None
+    }

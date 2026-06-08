@@ -27,7 +27,8 @@ from app.schemas import (
     PrescriptionCreate,
     PrescriptionItemCreate,
     PharmacistReview,
-    RemoteAudit
+    RemoteAudit,
+    SupplementNoteCreate
 )
 
 Base.metadata.create_all(bind=engine)
@@ -319,6 +320,136 @@ def _prepare_test_data(db):
             _skip_expiry_check=True
         )
 
+    if not crud.get_prescription_by_no(db, "RX_SUPPLEMENT_PENDING"):
+        crud.create_prescription(
+            db,
+            PrescriptionCreate(
+                prescription_no="RX_SUPPLEMENT_PENDING",
+                patient_id=1,
+                patient_name="张三",
+                patient_id_card="110101199001011234",
+                hospital="测试医院",
+                doctor_name="测试医生",
+                diagnosis="补录测试-待审方处方",
+                issue_date=now,
+                expire_date=now + timedelta(days=7),
+                items=[
+                    PrescriptionItemCreate(
+                        drug_code="DRUG001",
+                        drug_name="阿莫西林胶囊",
+                        drug_category=DrugCategory.NORMAL,
+                        specification="0.5g*24粒",
+                        dosage="每次1粒",
+                        frequency="每日3次",
+                        quantity=1,
+                        unit="盒"
+                    )
+                ]
+            )
+        )
+
+    if not crud.get_prescription_by_no(db, "RX_SUPPLEMENT_EXPIRED"):
+        crud.create_prescription(
+            db,
+            PrescriptionCreate(
+                prescription_no="RX_SUPPLEMENT_EXPIRED",
+                patient_id=2,
+                patient_name="李四",
+                patient_id_card="110101199102022345",
+                hospital="测试医院",
+                doctor_name="测试医生",
+                diagnosis="补录测试-已过期处方",
+                issue_date=now - timedelta(days=10),
+                expire_date=now - timedelta(days=3),
+                items=[
+                    PrescriptionItemCreate(
+                        drug_code="DRUG001",
+                        drug_name="阿莫西林胶囊",
+                        drug_category=DrugCategory.NORMAL,
+                        specification="0.5g*24粒",
+                        dosage="每次1粒",
+                        frequency="每日3次",
+                        quantity=1,
+                        unit="盒"
+                    )
+                ]
+            )
+        )
+
+    if not crud.get_prescription_by_no(db, "RX_SUPPLEMENT_PICKED"):
+        rx = crud.create_prescription(
+            db,
+            PrescriptionCreate(
+                prescription_no="RX_SUPPLEMENT_PICKED",
+                patient_id=1,
+                patient_name="张三",
+                patient_id_card="110101199001011234",
+                hospital="测试医院",
+                doctor_name="测试医生",
+                diagnosis="补录测试-已核销处方",
+                issue_date=now - timedelta(days=5),
+                expire_date=now + timedelta(days=2),
+                items=[
+                    PrescriptionItemCreate(
+                        drug_code="DRUG001",
+                        drug_name="阿莫西林胶囊",
+                        drug_category=DrugCategory.NORMAL,
+                        specification="0.5g*24粒",
+                        dosage="每次1粒",
+                        frequency="每日3次",
+                        quantity=1,
+                        unit="盒"
+                    )
+                ]
+            )
+        )
+        crud.pharmacist_review(
+            db, rx.id,
+            PharmacistReview(
+                pharmacist_id=4,
+                opinion=AuditOpinion.APPROVED,
+                remark="已复核"
+            )
+        )
+        result = crud.generate_pickup_code(db, rx.id)
+        crud.verify_pickup_code(db, result["pickup_code"])
+
+    if not crud.get_prescription_by_no(db, "RX_SUPPLEMENT_REVIEWED"):
+        rx = crud.create_prescription(
+            db,
+            PrescriptionCreate(
+                prescription_no="RX_SUPPLEMENT_REVIEWED",
+                patient_id=1,
+                patient_name="张三",
+                patient_id_card="110101199001011234",
+                hospital="测试医院",
+                doctor_name="测试医生",
+                diagnosis="补录测试-已复核未审方处方",
+                issue_date=now - timedelta(days=2),
+                expire_date=now + timedelta(days=5),
+                items=[
+                    PrescriptionItemCreate(
+                        drug_code="DRUG001",
+                        drug_name="阿莫西林胶囊",
+                        drug_category=DrugCategory.NORMAL,
+                        specification="0.5g*24粒",
+                        dosage="每次1粒",
+                        frequency="每日3次",
+                        quantity=1,
+                        unit="盒"
+                    )
+                ]
+            )
+        )
+        crud.pharmacist_review(
+            db, rx.id,
+            PharmacistReview(
+                pharmacist_id=4,
+                opinion=AuditOpinion.APPROVED,
+                remark="已复核，普通药品无需远程审方"
+            )
+        )
+
     db.commit()
 
 
@@ -559,7 +690,7 @@ class TestKeyDrugPrescriptionFlow:
 class TestApiIntegration:
     """API集成测试 - 通过HTTP接口验证完整流程"""
 
-    @pytest_asyncio.fixture(scope="class")
+    @pytest.fixture(scope="function")
     async def async_client(self):
         async with AsyncClient(
             transport=ASGITransport(app=app),
@@ -792,6 +923,122 @@ class TestApiIntegration:
 
         print("✅ HTTP层测试通过：远程审方后读取审方意见结果正常")
 
+    @pytest.mark.asyncio
+    async def test_supplement_note_api(self, async_client):
+        """测试：临时补录说明 API 集成测试"""
+        now = datetime.utcnow()
+
+        prescription_data = {
+            "prescription_no": f"RX_API_SUPP_{now.strftime('%Y%m%d%H%M%S')}",
+            "patient_id": 1,
+            "patient_name": "测试患者",
+            "patient_id_card": "110101199001011234",
+            "hospital": "测试医院",
+            "doctor_name": "测试医生",
+            "diagnosis": "API补录测试",
+            "issue_date": now.isoformat(),
+            "expire_date": (now + timedelta(days=7)).isoformat(),
+            "items": [
+                {
+                    "drug_code": "DRUG001",
+                    "drug_name": "阿莫西林胶囊",
+                    "drug_category": "NORMAL",
+                    "specification": "0.5g*24粒",
+                    "dosage": "每次1粒",
+                    "frequency": "每日3次",
+                    "quantity": 1,
+                    "unit": "盒"
+                }
+            ]
+        }
+
+        response = await async_client.post("/api/prescriptions", json=prescription_data)
+        assert response.status_code == 200
+        prescription_id = response.json()["data"]["prescription_id"]
+        print(f"  ✅ API - 处方上传成功，ID: {prescription_id}")
+
+        supplement_data = {
+            "missing_reason": "处方附件缺少缴费凭证",
+            "supplement_deadline": (now + timedelta(hours=24)).isoformat(),
+            "handler_id": 4,
+            "remark": "请患者24小时内补交缴费凭证"
+        }
+
+        response = await async_client.post(
+            f"/api/prescriptions/{prescription_id}/supplement-note",
+            json=supplement_data
+        )
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert data["missing_reason"] == "处方附件缺少缴费凭证"
+        assert data["handler_name"] is not None
+        print(f"  ✅ API - 补录说明成功，记录ID: {data['record_id']}")
+
+        response = await async_client.get(
+            f"/api/prescriptions/{prescription_id}/supplement-notes"
+        )
+        assert response.status_code == 200
+        notes_data = response.json()["data"]
+        assert notes_data["total"] >= 1
+        assert notes_data["items"][0]["missing_reason"] == "处方附件缺少缴费凭证"
+        print("  ✅ API - 查询补录记录成功")
+
+        response = await async_client.get(
+            f"/api/audit/prescriptions/{prescription_id}/opinion-history"
+        )
+        assert response.status_code == 200
+        history_data = response.json()["data"]
+        assert "supplement_records" in history_data
+        assert len(history_data["supplement_records"]) >= 1
+        print("  ✅ API - 审方详情中包含补录记录")
+
+        print("  ✅ API - 待审方处方补录说明测试通过")
+
+        prescription_data2 = {
+            "prescription_no": f"RX_API_SUPP_EXP_{now.strftime('%Y%m%d%H%M%S')}",
+            "patient_id": 2,
+            "patient_name": "测试患者2",
+            "patient_id_card": "110101199102022345",
+            "hospital": "测试医院",
+            "doctor_name": "测试医生",
+            "diagnosis": "API补录过期测试",
+            "issue_date": (now - timedelta(days=10)).isoformat(),
+            "expire_date": (now - timedelta(days=3)).isoformat(),
+            "items": [
+                {
+                    "drug_code": "DRUG001",
+                    "drug_name": "阿莫西林胶囊",
+                    "drug_category": "NORMAL",
+                    "specification": "0.5g*24粒",
+                    "dosage": "每次1粒",
+                    "frequency": "每日3次",
+                    "quantity": 1,
+                    "unit": "盒"
+                }
+            ]
+        }
+
+        response = await async_client.post("/api/prescriptions", json=prescription_data2)
+        assert response.status_code == 200
+        prescription_id2 = response.json()["data"]["prescription_id"]
+        print(f"  ✅ API - 过期处方上传成功，ID: {prescription_id2}")
+
+        supplement_data2 = {
+            "missing_reason": "测试过期处方补录",
+            "supplement_deadline": (now + timedelta(hours=24)).isoformat(),
+            "handler_id": 4
+        }
+
+        response = await async_client.post(
+            f"/api/prescriptions/{prescription_id2}/supplement-note",
+            json=supplement_data2
+        )
+        assert response.status_code == 400
+        assert "处方已过期，无法补录说明" in response.json()["detail"]
+        print(f"  ✅ API - 已过期处方补录被拒绝，错误信息: {response.json()['detail']}")
+
+        print("✅ API临时补录说明集成测试通过")
+
 
 class TestKeyRequirementValidation:
     """核心需求验证测试"""
@@ -874,3 +1121,173 @@ class TestKeyRequirementValidation:
         history = crud.get_audit_opinion_history(db_session, prescription.id)
         assert len(history["remote_auditor_history"]) >= 2
         print("✅ 需求验证：远程审方历史记录完整，可读取审方意见结果")
+
+
+class TestSupplementNote:
+    """临时补录说明功能测试"""
+
+    def test_01_supplement_note_for_pending_prescription_success(self, db_session):
+        """测试：给待审方处方补录说明成功"""
+        prescription = crud.get_prescription_by_no(db_session, "RX_SUPPLEMENT_PENDING")
+        assert prescription is not None
+        assert prescription.status == PrescriptionStatus.UPLOADED
+        assert prescription.is_expired() == False
+
+        now = datetime.utcnow()
+        supplement_deadline = now + timedelta(days=3)
+        note = SupplementNoteCreate(
+            missing_reason="处方附件缺少患者身份证照片",
+            supplement_deadline=supplement_deadline,
+            handler_id=4,
+            remark="请患者尽快补交身份证照片"
+        )
+
+        record = crud.add_supplement_note(db_session, prescription.id, note)
+
+        assert record is not None
+        assert record.prescription_id == prescription.id
+        assert record.missing_reason == "处方附件缺少患者身份证照片"
+        assert record.handler_id == 4
+        assert record.handler_name is not None
+        assert record.supplement_deadline == supplement_deadline
+        assert record.remark == "请患者尽快补交身份证照片"
+        assert record.created_at is not None
+
+        print(f"✅ 补录说明成功，记录ID: {record.id}，处理人: {record.handler_name}")
+
+    def test_02_supplement_note_record_in_audit_detail(self, db_session):
+        """测试：补录记录能在审方详情里查到"""
+        prescription = crud.get_prescription_by_no(db_session, "RX_SUPPLEMENT_PENDING")
+        assert prescription is not None
+
+        history = crud.get_audit_opinion_history(db_session, prescription.id)
+        assert "supplement_records" in history
+        assert len(history["supplement_records"]) >= 1
+
+        supplement_record = history["supplement_records"][0]
+        assert supplement_record["missing_reason"] == "处方附件缺少患者身份证照片"
+        assert supplement_record["handler_id"] == 4
+        assert supplement_record["handler_name"] is not None
+        assert "supplement_deadline" in supplement_record
+        assert "created_at" in supplement_record
+
+        print("✅ 审方详情中可查到补录记录")
+
+    def test_03_supplement_note_for_expired_prescription_rejected(self, db_session):
+        """测试：给已过期处方补录说明被拒绝"""
+        prescription = crud.get_prescription_by_no(db_session, "RX_SUPPLEMENT_EXPIRED")
+        assert prescription is not None
+        assert prescription.is_expired() == True
+
+        now = datetime.utcnow()
+        note = SupplementNoteCreate(
+            missing_reason="测试过期处方补录",
+            supplement_deadline=now + timedelta(days=1),
+            handler_id=4
+        )
+
+        with pytest.raises(ValueError, match="处方已过期，无法补录说明") as exc_info:
+            crud.add_supplement_note(db_session, prescription.id, note)
+
+        updated = crud.get_prescription(db_session, prescription.id)
+        assert updated.status == PrescriptionStatus.EXPIRED
+
+        print(f"✅ 已过期处方补录被拒绝，错误信息: {exc_info.value}")
+
+    def test_04_supplement_note_for_picked_up_prescription_rejected(self, db_session):
+        """测试：给已核销处方补录说明被拒绝"""
+        prescription = crud.get_prescription_by_no(db_session, "RX_SUPPLEMENT_PICKED")
+        assert prescription is not None
+        assert prescription.status == PrescriptionStatus.PICKED_UP
+
+        now = datetime.utcnow()
+        note = SupplementNoteCreate(
+            missing_reason="测试已核销处方补录",
+            supplement_deadline=now + timedelta(days=1),
+            handler_id=4
+        )
+
+        with pytest.raises(ValueError, match="处方已核销，无法补录说明") as exc_info:
+            crud.add_supplement_note(db_session, prescription.id, note)
+
+        print(f"✅ 已核销处方补录被拒绝，错误信息: {exc_info.value}")
+
+    def test_05_supplement_note_for_reviewed_prescription_rejected(self, db_session):
+        """测试：给非待审方状态处方补录说明被拒绝"""
+        prescription = crud.get_prescription_by_no(db_session, "RX_SUPPLEMENT_REVIEWED")
+        assert prescription is not None
+        assert prescription.status == PrescriptionStatus.PHARMACIST_REVIEWED
+
+        now = datetime.utcnow()
+        note = SupplementNoteCreate(
+            missing_reason="测试已复核处方补录",
+            supplement_deadline=now + timedelta(days=1),
+            handler_id=4
+        )
+
+        with pytest.raises(ValueError, match="仅待审方（UPLOADED）状态的处方可补录说明") as exc_info:
+            crud.add_supplement_note(db_session, prescription.id, note)
+
+        print(f"✅ 非待审方状态处方补录被拒绝，错误信息: {exc_info.value}")
+
+    def test_06_acceptance_test_full_flow(self, db_session):
+        """验收用例：给待审方处方补录说明成功，再尝试给已过期处方补录并看到拒绝原因"""
+        print("\n=== 验收用例开始 ===")
+
+        print("\n步骤1: 给待审方处方补录说明")
+        pending_rx = crud.get_prescription_by_no(db_session, "RX_SUPPLEMENT_PENDING")
+        assert pending_rx is not None
+        assert pending_rx.status == PrescriptionStatus.UPLOADED
+
+        now = datetime.utcnow()
+        deadline = now + timedelta(hours=48)
+        note = SupplementNoteCreate(
+            missing_reason="处方附件缺少医生签章",
+            supplement_deadline=deadline,
+            handler_id=4,
+            remark="请联系医院补盖医生签章后重新上传"
+        )
+
+        record = crud.add_supplement_note(db_session, pending_rx.id, note)
+        assert record is not None
+        assert record.missing_reason == "处方附件缺少医生签章"
+        print(f"✅ 待审方处方补录成功，记录ID: {record.id}")
+
+        print("\n步骤2: 在审方详情中查询补录记录")
+        history = crud.get_audit_opinion_history(db_session, pending_rx.id)
+        assert len(history["supplement_records"]) >= 1
+        latest_record = history["supplement_records"][0]
+        assert latest_record["missing_reason"] == "处方附件缺少医生签章"
+        assert latest_record["handler_name"] is not None
+        print(f"✅ 审方详情中查到补录记录，处理人: {latest_record['handler_name']}")
+
+        print("\n步骤3: 尝试给已过期处方补录说明")
+        expired_rx = crud.get_prescription_by_no(db_session, "RX_SUPPLEMENT_EXPIRED")
+        assert expired_rx is not None
+        assert expired_rx.is_expired() == True
+
+        note2 = SupplementNoteCreate(
+            missing_reason="测试过期处方",
+            supplement_deadline=deadline,
+            handler_id=4
+        )
+
+        try:
+            crud.add_supplement_note(db_session, expired_rx.id, note2)
+            assert False, "应该抛出异常"
+        except ValueError as e:
+            error_msg = str(e)
+            assert "处方已过期，无法补录说明" in error_msg
+            print(f"❌ 已过期处方补录被拒绝，拒绝原因: {error_msg}")
+
+        print("\n步骤4: 验证重点药品远程审方限制未放松")
+        key_drug_rx = crud.get_prescription_by_no(db_session, "RX202606010002")
+        assert key_drug_rx is not None
+        assert key_drug_rx.has_key_drug == True
+        assert key_drug_rx.remote_auditor_opinion == AuditOpinion.PENDING
+
+        with pytest.raises(ValueError, match="重点药品处方必须经过远程审方通过后才能生成取药码"):
+            crud.generate_pickup_code(db_session, key_drug_rx.id)
+        print("✅ 重点药品远程审方限制未放松")
+
+        print("\n=== 验收用例全部通过 ===")

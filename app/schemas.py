@@ -161,6 +161,27 @@ class AuditLog(AuditLogBase):
         from_attributes = True
 
 
+class SupplementNoteCreate(BaseModel):
+    missing_reason: str
+    supplement_deadline: datetime
+    handler_id: int
+    remark: Optional[str] = None
+
+
+class SupplementNote(BaseModel):
+    id: int
+    prescription_id: int
+    missing_reason: str
+    supplement_deadline: datetime
+    handler_id: Optional[int] = None
+    handler_name: Optional[str] = None
+    remark: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
 class ApiResponse(BaseModel):
     code: int
     message: str

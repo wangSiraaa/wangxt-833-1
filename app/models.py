@@ -91,6 +91,7 @@ class Prescription(Base):
     remote_auditor = relationship("User", foreign_keys=[remote_auditor_id], backref="auditor_prescriptions")
     items = relationship("PrescriptionItem", back_populates="prescription", cascade="all, delete-orphan")
     audit_logs = relationship("AuditLog", back_populates="prescription", cascade="all, delete-orphan")
+    supplement_records = relationship("SupplementRecord", back_populates="prescription", cascade="all, delete-orphan")
 
     def is_expired(self):
         return datetime.utcnow() > self.expire_date
@@ -134,3 +135,19 @@ class AuditLog(Base):
 
     prescription = relationship("Prescription", back_populates="audit_logs")
     operator = relationship("User", foreign_keys=[operator_id])
+
+
+class SupplementRecord(Base):
+    __tablename__ = "supplement_records"
+
+    id = Column(Integer, primary_key=True, index=True)
+    prescription_id = Column(Integer, ForeignKey("prescriptions.id"))
+    missing_reason = Column(Text, nullable=False)
+    supplement_deadline = Column(DateTime, nullable=False)
+    handler_id = Column(Integer, ForeignKey("users.id"))
+    handler_name = Column(String(100))
+    remark = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    prescription = relationship("Prescription", back_populates="supplement_records")
+    handler = relationship("User", foreign_keys=[handler_id])

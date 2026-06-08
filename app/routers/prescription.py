@@ -10,6 +10,7 @@ from app.schemas import (
     PrescriptionCreate,
     PharmacistReview,
     RemoteAudit,
+    SupplementNoteCreate,
     ApiResponse
 )
 from app import crud
@@ -91,3 +92,42 @@ def remote_audit(prescription_id: int, audit_in: RemoteAudit, db: Session = Depe
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/{prescription_id}/supplement-note", response_model=ApiResponse)
+def add_supplement_note(
+    prescription_id: int,
+    note_in: SupplementNoteCreate,
+    db: Session = Depends(get_db)
+):
+    try:
+        record = crud.add_supplement_note(db, prescription_id, note_in)
+        return ApiResponse(
+            code=200,
+            message="补录说明成功",
+            data={
+                "record_id": record.id,
+                "prescription_id": record.prescription_id,
+                "missing_reason": record.missing_reason,
+                "supplement_deadline": record.supplement_deadline,
+                "handler_name": record.handler_name
+            }
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/{prescription_id}/supplement-notes", response_model=ApiResponse)
+def get_supplement_notes(prescription_id: int, db: Session = Depends(get_db)):
+    prescription = crud.get_prescription(db, prescription_id)
+    if not prescription:
+        raise HTTPException(status_code=404, detail="处方不存在")
+    records = crud.get_supplement_records(db, prescription_id)
+    return ApiResponse(
+        code=200,
+        message="查询成功",
+        data={
+            "total": len(records),
+            "items": [crud._serialize_supplement_record(r) for r in records]
+        }
+    )
