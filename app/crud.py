@@ -403,6 +403,23 @@ def get_audit_query(
     return {"total": total, "items": items}
 
 
+def _serialize_audit_log(log: AuditLog) -> dict:
+    return {
+        "id": log.id,
+        "prescription_id": log.prescription_id,
+        "operator_id": log.operator_id,
+        "operator_name": log.operator_name,
+        "operator_role": log.operator_role.value if log.operator_role else None,
+        "action": log.action,
+        "old_status": log.old_status.value if log.old_status else None,
+        "new_status": log.new_status.value if log.new_status else None,
+        "old_opinion": log.old_opinion.value if log.old_opinion else None,
+        "new_opinion": log.new_opinion.value if log.new_opinion else None,
+        "remark": log.remark,
+        "created_at": log.created_at.isoformat() if log.created_at else None
+    }
+
+
 def get_audit_opinion_history(db: Session, prescription_id: int) -> dict:
     prescription = get_prescription(db, prescription_id)
     if not prescription:
@@ -422,14 +439,17 @@ def get_audit_opinion_history(db: Session, prescription_id: int) -> dict:
     return {
         "prescription_id": prescription.id,
         "prescription_no": prescription.prescription_no,
-        "pharmacist_opinion": prescription.pharmacist_opinion,
+        "patient_name": prescription.patient_name,
+        "has_key_drug": prescription.has_key_drug,
+        "status": prescription.status.value if prescription.status else None,
+        "pharmacist_opinion": prescription.pharmacist_opinion.value if prescription.pharmacist_opinion else None,
         "pharmacist_remark": prescription.pharmacist_remark,
-        "pharmacist_review_time": prescription.pharmacist_review_time,
-        "remote_auditor_opinion": prescription.remote_auditor_opinion,
+        "pharmacist_review_time": prescription.pharmacist_review_time.isoformat() if prescription.pharmacist_review_time else None,
+        "remote_auditor_opinion": prescription.remote_auditor_opinion.value if prescription.remote_auditor_opinion else None,
         "remote_auditor_remark": prescription.remote_auditor_remark,
-        "remote_audit_time": prescription.remote_audit_time,
-        "pharmacist_history": pharmacist_logs,
-        "remote_auditor_history": remote_auditor_logs
+        "remote_audit_time": prescription.remote_audit_time.isoformat() if prescription.remote_audit_time else None,
+        "pharmacist_history": [_serialize_audit_log(log) for log in pharmacist_logs],
+        "remote_auditor_history": [_serialize_audit_log(log) for log in remote_auditor_logs]
     }
 
 

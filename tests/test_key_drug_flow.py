@@ -487,10 +487,22 @@ class TestKeyDrugPrescriptionFlow:
         history = crud.get_audit_opinion_history(db_session, prescription.id)
 
         assert history["prescription_id"] == prescription.id
-        assert history["pharmacist_opinion"] == AuditOpinion.APPROVED
-        assert history["remote_auditor_opinion"] == AuditOpinion.APPROVED
+        assert history["pharmacist_opinion"] == AuditOpinion.APPROVED.value
+        assert history["remote_auditor_opinion"] == AuditOpinion.APPROVED.value
         assert len(history["pharmacist_history"]) >= 1
         assert len(history["remote_auditor_history"]) >= 1
+
+        for log in history["pharmacist_history"]:
+            assert "old_opinion" in log
+            assert "new_opinion" in log
+            assert isinstance(log["old_opinion"], (str, type(None)))
+            assert isinstance(log["new_opinion"], (str, type(None)))
+
+        for log in history["remote_auditor_history"]:
+            assert "old_opinion" in log
+            assert "new_opinion" in log
+            assert isinstance(log["old_opinion"], (str, type(None)))
+            assert isinstance(log["new_opinion"], (str, type(None)))
 
         print("✅ 稽核查询验证通过：审方意见历史完整")
 
@@ -526,14 +538,20 @@ class TestKeyDrugPrescriptionFlow:
         history = crud.get_audit_opinion_history(db_session, prescription.id)
         assert len(history["remote_auditor_history"]) >= 2
 
-        opinions = [log.new_opinion for log in history["remote_auditor_history"]]
-        assert AuditOpinion.APPROVED in opinions
-        assert AuditOpinion.NEED_REVIEW in opinions
+        opinions = [log["new_opinion"] for log in history["remote_auditor_history"]]
+        assert AuditOpinion.APPROVED.value in opinions
+        assert AuditOpinion.NEED_REVIEW.value in opinions
 
         for i in range(1, len(history["remote_auditor_history"])):
-            assert history["remote_auditor_history"][i].old_opinion != \
-                   history["remote_auditor_history"][i].new_opinion, \
+            assert history["remote_auditor_history"][i]["old_opinion"] != \
+                   history["remote_auditor_history"][i]["new_opinion"], \
                    "远程审方意见必须每次都改变"
+
+        for log in history["remote_auditor_history"]:
+            assert isinstance(log["old_opinion"], str) or log["old_opinion"] is None
+            assert isinstance(log["new_opinion"], str)
+            assert isinstance(log["operator_role"], str)
+            assert isinstance(log["created_at"], str)
 
         print("✅ 种子数据验证：处方3远程审方意见多次改变")
 
@@ -632,6 +650,147 @@ class TestApiIntegration:
         print("  ✅ API - 稽核查询-操作日志完整")
 
         print("✅ API集成测试全部通过")
+
+    @pytest.mark.asyncio
+    async def test_remote_audit_opinion_history_api(self, async_client):
+        """测试：远程审方后通过HTTP接口读取审方意见结果"""
+        now = datetime.utcnow()
+        prescription_no = f"RX_OP_HIST_{now.strftime('%Y%m%d%H%M%S')}"
+
+        prescription_data = {
+            "prescription_no": prescription_no,
+            "patient_id": 2,
+            "patient_name": "李四",
+            "patient_id_card": "110101199002025678",
+            "hospital": "北京协和医院",
+            "doctor_name": "李医生",
+            "diagnosis": "急性疼痛需镇痛",
+            "issue_date": now.isoformat(),
+            "expire_date": (now + timedelta(days=7)).isoformat(),
+            "items": [
+                {
+                    "drug_code": "DRUG005",
+                    "drug_name": "盐酸羟考酮缓释片",
+                    "drug_category": "KEY",
+                    "specification": "10mg*10片",
+                    "dosage": "每次1片",
+                    "frequency": "每日2次",
+                    "quantity": 1,
+                    "unit": "盒"
+                }
+            ]
+        }
+
+        response = await async_client.post("/api/prescriptions", json=prescription_data)
+        assert response.status_code == 200
+        data = response.json()
+        prescription_id = data["data"]["prescription_id"]
+        print(f"  ✅ API - 处方上传成功，ID: {prescription_id}")
+
+        response = await async_client.get(
+            f"/api/audit/prescriptions/{prescription_id}/opinion-history"
+        )
+        assert response.status_code == 200
+        history_data = response.json()["data"]
+        assert history_data["remote_auditor_opinion"] == "PENDING"
+        assert history_data["pharmacist_opinion"] == "PENDING"
+        assert len(history_data["remote_auditor_history"]) == 0
+        assert len(history_data["pharmacist_history"]) == 0
+        print("  ✅ API - 审方前读取：审方意见为PENDING，历史记录为空")
+
+        response = await async_client.post(
+            f"/api/prescriptions/{prescription_id}/pharmacist-review",
+            json={
+                "pharmacist_id": 4,
+                "opinion": "APPROVED",
+                "remark": "药店药师复核通过，确认重点药品"
+            }
+        )
+        assert response.status_code == 200
+        print("  ✅ API - 药店药师复核通过")
+
+        response = await async_client.get(
+            f"/api/audit/prescriptions/{prescription_id}/opinion-history"
+        )
+        assert response.status_code == 200
+        history_data = response.json()["data"]
+        assert history_data["pharmacist_opinion"] == "APPROVED"
+        assert history_data["remote_auditor_opinion"] == "PENDING"
+        assert len(history_data["pharmacist_history"]) == 1
+        assert history_data["pharmacist_history"][0]["old_opinion"] == "PENDING"
+        assert history_data["pharmacist_history"][0]["new_opinion"] == "APPROVED"
+        assert history_data["pharmacist_history"][0]["operator_role"] == "PHARMACIST"
+        print("  ✅ API - 药师复核后读取：药师意见已更新，历史记录可追溯")
+
+        response = await async_client.post(
+            f"/api/prescriptions/{prescription_id}/remote-audit",
+            json={
+                "remote_auditor_id": 5,
+                "opinion": "NEED_REVIEW",
+                "remark": "请补充患者疼痛评分记录"
+            }
+        )
+        assert response.status_code == 200
+        assert response.json()["data"]["opinion_changed"] == True
+        print("  ✅ API - 远程审方第一次：PENDING → NEED_REVIEW")
+
+        response = await async_client.get(
+            f"/api/audit/prescriptions/{prescription_id}/opinion-history"
+        )
+        assert response.status_code == 200
+        history_data = response.json()["data"]
+        assert history_data["remote_auditor_opinion"] == "NEED_REVIEW"
+        assert len(history_data["remote_auditor_history"]) == 1
+        assert history_data["remote_auditor_history"][0]["old_opinion"] == "PENDING"
+        assert history_data["remote_auditor_history"][0]["new_opinion"] == "NEED_REVIEW"
+        assert history_data["remote_auditor_history"][0]["operator_role"] == "REMOTE_AUDITOR"
+        assert isinstance(history_data["remote_auditor_history"][0]["created_at"], str)
+        assert "T" in history_data["remote_auditor_history"][0]["created_at"]
+        print("  ✅ API - 第一次远程审方后读取：意见从PENDING改为NEED_REVIEW，历史记录完整")
+
+        response = await async_client.post(
+            f"/api/prescriptions/{prescription_id}/remote-audit",
+            json={
+                "remote_auditor_id": 5,
+                "opinion": "APPROVED",
+                "remark": "已补充疼痛评分，同意发药"
+            }
+        )
+        assert response.status_code == 200
+        assert response.json()["data"]["opinion_changed"] == True
+        print("  ✅ API - 远程审方第二次：NEED_REVIEW → APPROVED")
+
+        response = await async_client.get(
+            f"/api/audit/prescriptions/{prescription_id}/opinion-history"
+        )
+        assert response.status_code == 200
+        history_data = response.json()["data"]
+        assert history_data["remote_auditor_opinion"] == "APPROVED"
+        assert history_data["pharmacist_opinion"] == "APPROVED"
+        assert len(history_data["remote_auditor_history"]) == 2
+        assert history_data["remote_auditor_history"][0]["old_opinion"] == "NEED_REVIEW"
+        assert history_data["remote_auditor_history"][0]["new_opinion"] == "APPROVED"
+        assert history_data["remote_auditor_history"][1]["old_opinion"] == "PENDING"
+        assert history_data["remote_auditor_history"][1]["new_opinion"] == "NEED_REVIEW"
+
+        for log in history_data["remote_auditor_history"]:
+            assert isinstance(log["old_opinion"], str) or log["old_opinion"] is None
+            assert isinstance(log["new_opinion"], str)
+            assert isinstance(log["operator_role"], str)
+            assert isinstance(log["created_at"], str)
+            assert "old_status" in log
+            assert "new_status" in log
+            assert "remark" in log
+
+        for log in history_data["pharmacist_history"]:
+            assert isinstance(log["old_opinion"], str) or log["old_opinion"] is None
+            assert isinstance(log["new_opinion"], str)
+            assert isinstance(log["operator_role"], str)
+            assert isinstance(log["created_at"], str)
+
+        print("  ✅ API - 第二次远程审方后读取：意见从NEED_REVIEW改为APPROVED，完整历史可追溯")
+
+        print("✅ HTTP层测试通过：远程审方后读取审方意见结果正常")
 
 
 class TestKeyRequirementValidation:

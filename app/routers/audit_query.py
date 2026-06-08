@@ -1,5 +1,6 @@
-from typing import Optional
+from typing import Optional, Any
 from datetime import datetime
+from enum import Enum
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -11,8 +12,20 @@ from app import crud
 router = APIRouter(prefix="/api/audit", tags=["稽核查询"])
 
 
-def _to_dict(obj):
-    return {k: v for k, v in obj.__dict__.items() if not k.startswith('_')}
+def _serialize_value(v: Any) -> Any:
+    if isinstance(v, Enum):
+        return v.value
+    if isinstance(v, datetime):
+        return v.isoformat()
+    return v
+
+
+def _to_dict(obj: Any) -> dict:
+    return {
+        k: _serialize_value(v)
+        for k, v in obj.__dict__.items()
+        if not k.startswith('_')
+    }
 
 
 @router.get("/prescriptions", response_model=ApiResponse)
